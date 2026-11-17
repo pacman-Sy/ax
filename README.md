@@ -43,7 +43,7 @@ A code carries everything the other side needs:
 AR2X-6AAA-AGD5-TAD4-JES5-ZIRP-XGXU-GNQG-UQ7L-3BA
 ```
 
-That is base32 of a fixed binary record: version, purpose (`ssh` or `upload`), the host address (4 bytes IPv4 or 16 bytes IPv6), the port, and a 128-bit secret. The code is a signed-in-spirit description of *where* to connect and *what* to say when it gets there — the client dials the address directly. Nothing is looked up, nothing is brokered, nothing is stored.
+That is base32 of a fixed binary record: version, purpose (`ssh` or `upload`), the host address (4 bytes IPv4 or 16 bytes IPv6), an optional second address (usually the host's LAN address), the port, and a 128-bit secret. The code is a signed-in-spirit description of *where* to connect and *what* to say when it gets there — the client dials the address directly. Nothing is looked up, nothing is brokered, nothing is stored.
 
 ## Getting through the internet, not just the LAN
 
@@ -53,7 +53,9 @@ That is base32 of a fixed binary record: version, purpose (`ssh` or `upload`), t
 2. Otherwise it asks the gateway for a forwarding rule over UPnP IGD (SSDP discovery, `AddPortMapping` with a 2 hour lease, removed on exit).
 3. It then learns the public address: the gateway's `ExternalIPAddress`, or STUN, or a plain HTTP echo as a last resort.
 
-If no mapping could be arranged it says so and leaves the port alone, so a manual forward still works.
+If no mapping could be arranged it says so and leaves the port alone, so a manual forward still works. When it cannot even learn a public address it falls back to the LAN address and says the code is local-only rather than printing something that will time out.
+
+The code carries the LAN address alongside the public one. A caller dials the LAN address first with a short timeout and only then the public one, so two machines on the same network connect even when the router will not hairpin the public address, and a stale public address does not eat the whole timeout. `-v` prints each attempt.
 
 Flags that override all of that:
 
@@ -61,8 +63,8 @@ Flags that override all of that:
 startssh  -bind 0.0.0.0  -port 0  -ssh-port 22  -target 127.0.0.1
           -host <ip-or-name>  -pub-port <n>  -no-map
 upload    -bind 0.0.0.0  -port 0  -host <ip-or-name>  -pub-port <n>  -no-map
-connectssh -ssh ssh  -timeout 15
-download   -out .  -timeout 15
+connectssh -ssh ssh  -timeout 15  -v
+download   -out .  -timeout 15  -v
 ```
 
 ## Encryption

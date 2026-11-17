@@ -47,14 +47,20 @@ pub fn start(raw: &[String]) -> Result<(), String> {
     let endpoint = expose::expose_tcp(internal, pinned_host, pinned_port, no_map, "ax ssh")?;
 
     let secret: [u8; SECRET_LEN] = rand::bytes()?;
-    let code = Code::new(KIND_SSH, endpoint.ip, endpoint.port, secret)?;
+    let code = match endpoint.alt {
+        Some(lan) => Code::with_alt(KIND_SSH, endpoint.ip, lan, endpoint.port, secret)?,
+        None => Code::new(KIND_SSH, endpoint.ip, endpoint.port, secret)?,
+    };
 
     let upstream = format!("{target}:{ssh_port}");
 
     eprintln!(
         "ax: forwarding {} -> {upstream}",
-        SocketAddr::new(endpoint.ip, internal)
+        SocketAddr::new(endpoint.ip, endpoint.port)
     );
+    if let Some(lan) = endpoint.alt {
+        eprintln!("ax: same-network callers can use {lan} directly");
+    }
     println!("{}", code.encode());
     eprintln!(
         "\non the other machine:\n  ax connectssh {}\n",
@@ -121,7 +127,8 @@ pub fn connect(raw: &[String]) -> Result<(), String> {
         .or_else(|| std::env::var("AX_SSH_USER").ok())
         .unwrap_or_default();
 
-    let sock = netinfo::dial(code.addr(), Duration::from_secs(timeout as u64))?;
+    let verbose = args.flag("v") || args.flag("verbose");
+    let sock = netinfo::dial_any(&code.addrs(), Duration::from_secs(timeout as u64), verbose)?;
     let tunnel = tunnel::client(sock, &code.secret)?;
 
     let local = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("local bind: {e}"))?;

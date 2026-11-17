@@ -64,11 +64,13 @@ flags:
   startssh   -bind 0.0.0.0  -port 0  -ssh-port 22  -target 127.0.0.1
              -host <ip-or-name>  -pub-port <n>  -no-map
   upload     -bind 0.0.0.0  -port 0  -host <ip-or-name>  -pub-port <n>  -no-map
-  connectssh -ssh ssh  -timeout 15
-  download   -out .  -timeout 15
+  connectssh -ssh ssh  -timeout 15  -v
+  download   -out .  -timeout 15  -v
 
-The code carries address, port, purpose and a 128-bit secret; the far side
-needs nothing else. -no-map skips the gateway port mapping when the port is
+The code carries the public address, the host's LAN address (when it has one),
+the port, the purpose and a 128-bit secret; the far side needs nothing else.
+Dialling tries the LAN address first, so two machines on one network work even
+when the router will not hairpin the public address. -v shows each attempt. -no-map skips the gateway port mapping when the port is
 already forwarded.
 
 Every session is X25519 key agreement, HKDF-SHA256 key schedule, ChaCha20 for

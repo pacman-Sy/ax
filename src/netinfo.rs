@@ -47,36 +47,77 @@ pub fn is_private(ip: IpAddr) -> bool {
     }
 }
 
-/// STUN first because it is stateless and fast, plain http echo as the fallback
-/// for networks that swallow UDP.
-pub fn public_ip() -> Result<IpAddr, String> {
-    let mut first_err: Option<String> = None;
+/// Discovers the public address with a wall-clock budget.
+///
+/// Every probe runs concurrently and the first usable answer wins, so a
+/// network that filters UDP (three or four dead STUN servers) does not cost
+/// four timeouts in a row before the http echo is even tried.
+pub fn public_ip_budget(budget: Duration, verbose: bool) -> Result<IpAddr, String> {
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    let (tx, rx) = mpsc::channel::<IpAddr>();
 
     for server in STUN_SERVERS {
-        match crate::stun::external_ip(server, Duration::from_secs(3)) {
-            Ok(ip) if !is_private(ip) => return Ok(ip),
-            Ok(_) => {}
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(e);
+        let tx = tx.clone();
+        let server = *server;
+        std::thread::spawn(move || {
+            if let Ok(ip) = crate::stun::external_ip(server, Duration::from_secs(2)) {
+                if !is_private(ip) {
+                    let _ = tx.send(ip);
                 }
             }
-        }
+        });
     }
 
     for url in IP_ECHO_SERVERS {
-        match http_echo_ip(url) {
-            Ok(ip) if !is_private(ip) => return Ok(ip),
-            Ok(_) => {}
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(e);
+        let tx = tx.clone();
+        let url = *url;
+        std::thread::spawn(move || {
+            if let Ok(ip) = http_echo_ip(url) {
+                if !is_private(ip) {
+                    let _ = tx.send(ip);
                 }
             }
+        });
+    }
+
+    drop(tx);
+
+    let deadline = Instant::now() + budget;
+    let mut remaining_probes = STUN_SERVERS.len() + IP_ECHO_SERVERS.len();
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let slice = (deadline - now).min(Duration::from_millis(250));
+
+        match rx.recv_timeout(slice) {
+            Ok(ip) => {
+                if verbose {
+                    eprintln!("ax: public address {ip}");
+                }
+                return Ok(ip);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if verbose {
+                    remaining_probes = remaining_probes.saturating_sub(0);
+                    let _ = remaining_probes;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    Err(first_err.unwrap_or_else(|| "no public address discovered".into()))
+    Err("no public address answered".into())
+}
+
+/// Background discovery still needs an answer, but a slow network should not
+/// hold up the command for long.
+pub fn public_ip() -> Result<IpAddr, String> {
+    public_ip_budget(Duration::from_secs(5), false)
 }
 
 fn http_echo_ip(url: &str) -> Result<IpAddr, String> {
@@ -108,11 +149,66 @@ fn http_echo_ip(url: &str) -> Result<IpAddr, String> {
         .map_err(|_| format!("{} answered with {line:?}, not an address", u.host))
 }
 
-pub fn dial(addr: SocketAddr, timeout: Duration) -> Result<TcpStream, String> {
-    let stream =
-        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect {addr}: {e}"))?;
+fn tune(stream: TcpStream) -> TcpStream {
     let _ = stream.set_read_timeout(None);
     let _ = stream.set_write_timeout(None);
     let _ = stream.set_nodelay(true);
-    Ok(stream)
+    stream
+}
+
+/// Dials a list of candidate addresses, first one that answers wins.
+///
+/// Every candidate gets a slice of the budget rather than the whole thing: a
+/// LAN address that is not there should not eat the timeout that the public
+/// address needs.
+pub fn dial_any(addrs: &[SocketAddr], timeout: Duration, verbose: bool) -> Result<TcpStream, String> {
+    if addrs.is_empty() {
+        return Err("no address to dial".into());
+    }
+
+    let mut seen = Vec::new();
+    for (index, addr) in addrs.iter().enumerate() {
+        if seen.contains(addr) {
+            continue;
+        }
+        seen.push(*addr);
+
+        let share = timeout
+            .checked_div((addrs.len() - index) as u32)
+            .unwrap_or(timeout)
+            .max(Duration::from_millis(500))
+            .min(timeout);
+
+        if verbose {
+            eprintln!("ax: dialing {addr} (up to {}s)", share.as_secs_f32());
+        }
+
+        match TcpStream::connect_timeout(addr, share) {
+            Ok(stream) => {
+                if verbose {
+                    eprintln!("ax: connected to {addr}");
+                }
+                return Ok(tune(stream));
+            }
+            Err(e) => {
+                if verbose {
+                    eprintln!("ax: {addr} failed: {e}");
+                }
+            }
+        }
+    }
+
+    let tried = seen
+        .iter()
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "could not reach the host at {tried} within {}s — \n\
+         \x20 check that startssh is still running and the port is reachable\n\
+         \x20 if both machines share a network, the LAN address is tried first\n\
+         \x20 behind CGNAT no forward exists: rerun there with -host <public ip>\n\
+         \x20 after forwarding the port yourself",
+        timeout.as_secs()
+    ))
 }

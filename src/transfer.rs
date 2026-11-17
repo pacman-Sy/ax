@@ -67,7 +67,10 @@ pub fn upload(raw: &[String]) -> Result<(), String> {
     let endpoint = expose::expose_tcp(internal, pinned_host, pinned_port, no_map, "ax transfer")?;
 
     let secret: [u8; SECRET_LEN] = rand::bytes()?;
-    let code = Code::new(KIND_UPLOAD, endpoint.ip, endpoint.port, secret)?;
+    let code = match endpoint.alt {
+        Some(lan) => Code::with_alt(KIND_UPLOAD, endpoint.ip, lan, endpoint.port, secret)?,
+        None => Code::new(KIND_UPLOAD, endpoint.ip, endpoint.port, secret)?,
+    };
 
     eprintln!("ax: sharing {} ({})", base_name(&path), human(size));
     println!("{}", code.encode());
@@ -128,7 +131,8 @@ pub fn download(raw: &[String]) -> Result<(), String> {
 
     let code = Code::parse(KIND_UPLOAD, &args.positional[0])?;
 
-    let sock = netinfo::dial(code.addr(), Duration::from_secs(timeout as u64))?;
+    let verbose = args.flag("v") || args.flag("verbose");
+    let sock = netinfo::dial_any(&code.addrs(), Duration::from_secs(timeout as u64), verbose)?;
     let tunnel = tunnel::client(sock, &code.secret)?;
 
     receive_file(tunnel, &out_dir)

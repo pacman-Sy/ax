@@ -7,6 +7,8 @@ use crate::upnp;
 
 pub struct Endpoint {
     pub ip: IpAddr,
+    /// The host's own LAN address for the same listener, when it has one.
+    pub alt: Option<IpAddr>,
     pub port: u16,
     mapper: Option<upnp::Mapper>,
     mapped: bool,
@@ -21,6 +23,21 @@ impl Drop for Endpoint {
                 let _ = mapper.unmap_tcp(self.port);
             }
         }
+    }
+}
+
+/// Public address if one answers quickly, otherwise the LAN address so the
+/// command still produces a usable code instead of failing outright.
+fn discover_or_lan(local: Option<IpAddr>) -> Result<IpAddr, String> {
+    match netinfo::public_ip() {
+        Ok(ip) => Ok(ip),
+        Err(e) => match local {
+            Some(ip) if !ip.is_unspecified() => {
+                eprintln!("ax: public address lookup failed ({e}), using the LAN address");
+                Ok(ip)
+            }
+            _ => Err(e),
+        },
     }
 }
 
@@ -54,25 +71,41 @@ pub fn expose_tcp(
 
     let mapped = mapper.is_some();
 
+    let local = netinfo::local_ip().ok();
+
     let ip = match pinned_host {
         Some(ip) => ip,
         None => match &mapper {
             Some(m) => match m.external_ip() {
                 Ok(ip) if !netinfo::is_private(ip) => ip,
-                _ => netinfo::public_ip()?,
+                _ => discover_or_lan(local)?,
             },
-            None => netinfo::public_ip()?,
+            None => discover_or_lan(local)?,
         },
     };
 
-    if !mapped && pinned_host.is_none() {
+    if !mapped && pinned_host.is_none() && netinfo::is_private(ip) {
+        // Advertising a LAN address is honest but only useful on that network;
+        // say so loudly instead of letting the far side time out silently.
+        eprintln!(
+            "ax: no port mapping and no public address — this code only works on the local \
+             network ({ip}); forward tcp/{port} on the router and rerun with -host <public-ip> \
+             for internet use"
+        );
+    } else if !mapped && pinned_host.is_none() {
         eprintln!(
             "ax: note: no automatic port forward — the router must already forward tcp/{port}"
         );
     }
 
+    // Same-network callers cannot always reach the public address (many
+    // routers will not hairpin), so carry the LAN address as well and let the
+    // far side try it first.
+    let alt = local.filter(|lan| netinfo::is_private(*lan) && *lan != ip && !lan.is_unspecified());
+
     Ok(Endpoint {
         ip,
+        alt,
         port,
         mapper,
         mapped,

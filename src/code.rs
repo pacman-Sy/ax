@@ -10,12 +10,21 @@ pub const SECRET_LEN: usize = 16;
 
 const VER4: u8 = 4;
 const VER6: u8 = 6;
+const VER4_ALT: u8 = 5;
+const VER6_ALT: u8 = 7;
+const FAM4: u8 = 4;
+const FAM6: u8 = 6;
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 #[derive(Clone)]
 pub struct Code {
     pub kind: u8,
     pub ip: IpAddr,
+    /// Optional second address for the same port, usually the host's LAN
+    /// address alongside its public one. The far side tries it first, which
+    /// keeps two machines on the same network working when the router will not
+    /// hairpin the public address.
+    pub alt: Option<IpAddr>,
     pub port: u16,
     pub secret: [u8; SECRET_LEN],
 }
@@ -28,29 +37,66 @@ impl Code {
         Ok(Code {
             kind,
             ip,
+            alt: None,
             port,
             secret,
         })
     }
 
-    pub fn addr(&self) -> SocketAddr {
-        SocketAddr::new(self.ip, self.port)
+    pub fn with_alt(
+        kind: u8,
+        ip: IpAddr,
+        alt: IpAddr,
+        port: u16,
+        secret: [u8; SECRET_LEN],
+    ) -> Result<Code, String> {
+        let mut code = Code::new(kind, ip, port, secret)?;
+        if alt != ip && !alt.is_unspecified() {
+            code.alt = Some(alt);
+        }
+        Ok(code)
+    }
+
+    /// Everything worth dialling, best first: the LAN address before the
+    /// public one.
+    pub fn addrs(&self) -> Vec<SocketAddr> {
+        let mut out = Vec::with_capacity(2);
+        if let Some(alt) = self.alt {
+            out.push(SocketAddr::new(alt, self.port));
+        }
+        out.push(SocketAddr::new(self.ip, self.port));
+        out
     }
 
     /// Grouped in fours so it survives being read off a screen or read aloud.
     pub fn encode(&self) -> String {
-        let mut payload: Vec<u8> = Vec::with_capacity(2 + 16 + 2 + SECRET_LEN);
+        let mut payload: Vec<u8> = Vec::with_capacity(2 + 16 + 17 + 2 + SECRET_LEN);
+        let has_alt = self.alt.is_some();
+
+        let version = match (self.ip, has_alt) {
+            (IpAddr::V4(_), false) => VER4,
+            (IpAddr::V6(_), false) => VER6,
+            (IpAddr::V4(_), true) => VER4_ALT,
+            (IpAddr::V6(_), true) => VER6_ALT,
+        };
+        payload.push(version);
+        payload.push(self.kind);
 
         match self.ip {
-            IpAddr::V4(v4) => {
-                payload.push(VER4);
-                payload.push(self.kind);
-                payload.extend_from_slice(&v4.octets());
-            }
-            IpAddr::V6(v6) => {
-                payload.push(VER6);
-                payload.push(self.kind);
-                payload.extend_from_slice(&v6.octets());
+            IpAddr::V4(v4) => payload.extend_from_slice(&v4.octets()),
+            IpAddr::V6(v6) => payload.extend_from_slice(&v6.octets()),
+        }
+
+        if let Some(alt) = self.alt {
+            match alt {
+                IpAddr::V4(v4) => {
+                    payload.push(FAM4);
+                    payload.extend_from_slice(&v4.octets());
+                }
+                IpAddr::V6(v6) => {
+                    payload.push(FAM6);
+                    payload.extend_from_slice(&v6.octets());
+                }
             }
         }
 
@@ -81,16 +127,22 @@ impl Code {
             return Err("code is too short".into());
         }
 
-        let (ip, off) = match raw[0] {
-            VER4 => {
-                if raw.len() != 2 + 4 + 2 + SECRET_LEN {
+        let has_alt = matches!(raw[0], VER4_ALT | VER6_ALT);
+
+        let (ip, mut off) = match raw[0] {
+            VER4 | VER4_ALT => {
+                let want = 2 + 4 + if has_alt { 1 + 4 } else { 0 } + 2 + SECRET_LEN;
+                if raw.len() != want {
                     return Err("code has the wrong length for ipv4".into());
                 }
-                let ip = IpAddr::V4(Ipv4Addr::new(raw[2], raw[3], raw[4], raw[5]));
-                (ip, 6)
+                (
+                    IpAddr::V4(Ipv4Addr::new(raw[2], raw[3], raw[4], raw[5])),
+                    6,
+                )
             }
-            VER6 => {
-                if raw.len() != 2 + 16 + 2 + SECRET_LEN {
+            VER6 | VER6_ALT => {
+                let want = 2 + 16 + if has_alt { 1 + 4 } else { 0 } + 2 + SECRET_LEN;
+                if raw.len() != want {
                     return Err("code has the wrong length for ipv6".into());
                 }
                 let mut octets = [0u8; 16];
@@ -99,6 +151,38 @@ impl Code {
             }
             _ => return Err("code carries an unknown version".into()),
         };
+
+        let mut alt = None;
+        if has_alt {
+            let family = raw[off];
+            off += 1;
+            match family {
+                FAM4 => {
+                    if raw.len() < off + 4 {
+                        return Err("code is truncated".into());
+                    }
+                    alt = Some(IpAddr::V4(Ipv4Addr::new(
+                        raw[off],
+                        raw[off + 1],
+                        raw[off + 2],
+                        raw[off + 3],
+                    )));
+                    off += 4;
+                }
+                FAM6 => {
+                    if raw.len() < off + 16 {
+                        return Err("code is truncated".into());
+                    }
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&raw[off..off + 16]);
+                    alt = Some(IpAddr::V6(Ipv6Addr::from(octets)));
+                    off += 16;
+                }
+                other => {
+                    return Err(format!("code carries an unknown address family {other}"));
+                }
+            }
+        }
 
         let kind = raw[1];
         if kind != want {
@@ -120,6 +204,7 @@ impl Code {
         Ok(Code {
             kind,
             ip,
+            alt,
             port,
             secret,
         })
@@ -226,6 +311,50 @@ mod tests {
         let back = Code::parse(KIND_UPLOAD, &lowered).unwrap();
         assert_eq!(back.ip, code.ip);
         assert_eq!(back.port, 443);
+    }
+
+    #[test]
+    fn round_trips_dual_ipv4() {
+        let code = Code::with_alt(
+            KIND_SSH,
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 24)),
+            55123,
+            secret(),
+        )
+        .unwrap();
+
+        let back = Code::parse(KIND_SSH, &code.encode()).unwrap();
+        assert_eq!(back.ip, code.ip);
+        assert_eq!(back.alt, code.alt);
+        assert_eq!(back.port, 55123);
+        assert_eq!(
+            back.addrs(),
+            vec![
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 24)), 55123),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42)), 55123),
+            ]
+        );
+    }
+
+    #[test]
+    fn round_trips_dual_mixed_family() {
+        let wan: IpAddr = "2001:db8::1".parse().unwrap();
+        let lan: IpAddr = "10.0.0.5".parse().unwrap();
+        let code = Code::with_alt(KIND_UPLOAD, wan, lan, 9000, secret()).unwrap();
+
+        let back = Code::parse(KIND_UPLOAD, &code.encode()).unwrap();
+        assert_eq!(back.ip, wan);
+        assert_eq!(back.alt, Some(lan));
+    }
+
+    #[test]
+    fn alt_is_skipped_when_it_matches_the_primary() {
+        let ip: IpAddr = "10.0.0.5".parse().unwrap();
+        let code = Code::with_alt(KIND_SSH, ip, ip, 22, secret()).unwrap();
+        assert!(code.alt.is_none());
+        let back = Code::parse(KIND_SSH, &code.encode()).unwrap();
+        assert!(back.alt.is_none());
     }
 
     #[test]
