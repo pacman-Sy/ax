@@ -179,6 +179,12 @@ case ":$PATH:" in
     *":$PREFIX:"*) on_path=1 ;;
 esac
 
+# A system directory on the default PATH needs no rc edit, even when the
+# installing shell was started with a stripped PATH.
+case "$PREFIX" in
+    /usr/local/bin|/usr/bin|/bin|/opt/homebrew/bin) on_path=1 ;;
+esac
+
 if [ "$on_path" = "0" ]; then
     line="export PATH=\"$PREFIX:\$PATH\""
     stamped="# added by the ax installer"
