@@ -1,0 +1,17 @@
+[package]
+name = "ax"
+version = "1.2.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Peer-to-peer ssh relay and file transfer with self-contained codes"
+license = "MIT"
+repository = "https://github.com/pacman-Sy/ax"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
