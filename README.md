@@ -17,12 +17,14 @@ curl -fsSL https://github.com/pacman-Sy/ax/releases/latest/download/install.sh |
 
 No toolchain needed: the script downloads the prebuilt release binary for your platform, checks its SHA-256, and installs it to `~/.local/bin` (`AX_PREFIX` to change it). Where there is no build for the platform it falls back to compiling from source, installing a minimal Rust toolchain first if there is none.
 
-Current releases ship `ax-linux-x86_64`, statically linked against musl, so it runs on any x86_64 Linux regardless of glibc. Grab it directly if you prefer:
+Current releases ship `ax-linux-x86_64` and `ax-linux-aarch64`, both statically linked against musl, so they run on any Linux of that architecture regardless of glibc. Grab one directly if you prefer:
 
 ```sh
 curl -fLO https://github.com/pacman-Sy/ax/releases/latest/download/ax-linux-x86_64
 chmod +x ax-linux-x86_64 && ./ax-linux-x86_64 version
 ```
+
+Assets are published by the `release` workflow (`.github/workflows/release.yml`) for Linux x86_64/aarch64, macOS x86_64/arm64 and Windows x86_64, each with a `.sha256` next to it. Platforms without a build get the source path automatically.
 
 Building from source, zero crates:
 
