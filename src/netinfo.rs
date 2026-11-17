@@ -28,6 +28,20 @@ pub fn local_ip() -> Result<IpAddr, String> {
     Ok(addr.ip())
 }
 
+/// True when two private IPv4 addresses could plausibly share a network,
+/// judged on the first two octets. Conservative on purpose: a false positive
+/// only costs a timeout, a false negative would skip an address that works.
+pub fn same_private_scope(a: IpAddr, b: IpAddr) -> bool {
+    match (a, b) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let (a, b) = (a.octets(), b.octets());
+            a[0] == b[0] && a[1] == b[1]
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => a.segments()[0] == b.segments()[0],
+        _ => false,
+    }
+}
+
 pub fn is_private(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -166,6 +180,39 @@ pub fn dial_any(addrs: &[SocketAddr], timeout: Duration, verbose: bool) -> Resul
         return Err("no address to dial".into());
     }
 
+    // Nothing private answers across a network boundary, so waiting out the
+    // whole budget for an address in a different private range only wastes
+    // time. Give each one a short probe, then explain the mismatch.
+    let here = local_ip().ok();
+    if let Some(here) = here {
+        let all_elsewhere = addrs.iter().all(|a| {
+            is_private(a.ip()) && !same_private_scope(a.ip(), here)
+        });
+        if all_elsewhere {
+            for addr in addrs {
+                let probe = Duration::from_secs(3);
+                if verbose {
+                    eprintln!("ax: dialing {addr} (up to 3s, different network)");
+                }
+                if let Ok(stream) = TcpStream::connect_timeout(addr, probe) {
+                    return Ok(tune(stream));
+                }
+            }
+            return Err(format!(
+                "the code points into another private network: {}\n\
+                 \x20 you are on {here}, so that address is not yours to reach\n\
+                 \x20 run this from a machine on the host's own network, or have the\n\
+                 \x20 host publish a forwarded port (UPnP, or -no-map -host <public-ip>\n\
+                 \x20 -pub-port <forwarded-port>) so the code carries a public address",
+                addrs
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
     let mut seen = Vec::new();
     for (index, addr) in addrs.iter().enumerate() {
         if seen.contains(addr) {
@@ -198,14 +245,16 @@ pub fn dial_any(addrs: &[SocketAddr], timeout: Duration, verbose: bool) -> Resul
         }
     }
 
+    let local = local_ip().ok();
     let tried = seen
         .iter()
-        .map(|a| {
-            if is_private(a.ip()) {
-                format!("{a} (private)")
-            } else {
-                a.to_string()
+        .map(|a| match local {
+            Some(here) if is_private(a.ip()) && same_private_scope(a.ip(), here) => {
+                format!("{a} (same network as you)")
             }
+            Some(_) if is_private(a.ip()) => format!("{a} (different private network)"),
+            _ if is_private(a.ip()) => format!("{a} (private)"),
+            _ => a.to_string(),
         })
         .collect::<Vec<_>>()
         .join(", ");
