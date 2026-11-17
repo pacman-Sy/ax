@@ -8,7 +8,15 @@
 #   AX_SOURCE   set to 1 to skip the binary and build from source
 set -euo pipefail
 
-PREFIX="${AX_PREFIX:-$HOME/.local/bin}"
+# Root installing system-wide lands in /usr/local/bin, which is already on
+# PATH; everyone else gets ~/.local/bin and a PATH line in their shell rc.
+if [ -n "${AX_PREFIX:-}" ]; then
+    PREFIX="$AX_PREFIX"
+elif [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+    PREFIX=/usr/local/bin
+else
+    PREFIX="$HOME/.local/bin"
+fi
 REF="${AX_REF:-main}"
 REPO="https://github.com/pacman-Sy/ax"
 BASE="https://github.com/pacman-Sy/ax/releases/latest/download"
@@ -164,9 +172,32 @@ if [ "${AX_SOURCE:-0}" = "1" ] || ! install_binary; then
 fi
 
 say "installed $PREFIX/ax"
+
+# Make it callable in the next shell instead of leaving the user to edit PATH.
+on_path=0
 case ":$PATH:" in
-    *":$PREFIX:"*) ;;
-    *) say "add it to PATH: export PATH=\"$PREFIX:\$PATH\"" ;;
+    *":$PREFIX:"*) on_path=1 ;;
 esac
+
+if [ "$on_path" = "0" ]; then
+    line="export PATH=\"$PREFIX:\$PATH\""
+    stamped="# added by the ax installer"
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        if [ -f "$rc" ] && grep -qF "$line" "$rc" 2>/dev/null; then
+            on_path=2
+            break
+        fi
+    done
+    if [ "$on_path" = "0" ]; then
+        rc="$HOME/.bashrc"
+        [ -n "${ZSH_VERSION:-}" ] && rc="$HOME/.zshrc"
+        if [ -w "$rc" ] || [ -w "$(dirname "$rc")" ]; then
+            printf '\n%s\n%s\n' "$stamped" "$line" >> "$rc"
+            say "added $PREFIX to PATH in $rc — run: . $rc"
+        else
+            say "add it to PATH: $line"
+        fi
+    fi
+fi
 
 "$PREFIX/ax" version
