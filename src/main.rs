@@ -5,6 +5,7 @@ mod crypto;
 mod expose;
 mod http;
 mod netinfo;
+mod relay;
 mod rand;
 mod splice;
 mod ssh;
@@ -30,6 +31,7 @@ fn main() {
         "connectssh" => ssh::connect(rest),
         "upload" => transfer::upload(rest),
         "download" => transfer::download(rest),
+        "relay" => relay_command(rest),
         "version" | "-v" | "--version" => {
             println!("ax {VERSION}");
             Ok(())
@@ -51,6 +53,17 @@ fn main() {
     }
 }
 
+fn relay_command(raw: &[String]) -> Result<(), String> {
+    let args = cli::Args::parse(raw);
+    let bind = args.string("bind", "0.0.0.0");
+    let port = args.int("port", 7000)?;
+
+    if !(0..=65535).contains(&port) {
+        return Err(format!("-port {port} is out of range"));
+    }
+    relay::serve(&bind, port as u16)
+}
+
 fn usage() {
     eprintln!(
         "ax — peer-to-peer ssh relay and file transfer, no middle server
@@ -59,6 +72,7 @@ fn usage() {
   ax connectssh <code> [user]      dial that code and open ssh through it
   ax upload <file> [flags]         serve a file, print a code to share
   ax download <code> [flags]       pull the file the code points at
+  ax relay [flags]                 pair two hosts that cannot accept inbound
 
 flags:
   startssh   -bind 0.0.0.0  -port 0  -ssh-port 22  -target 127.0.0.1
@@ -66,6 +80,12 @@ flags:
   upload     -bind 0.0.0.0  -port 0  -host <ip-or-name>  -pub-port <n>  -no-map
   connectssh -ssh ssh  -timeout 15  -v
   download   -out .  -timeout 15  -v
+  relay      -bind 0.0.0.0  -port 7000
+
+  -relay <host:port> on startssh/upload hands the code to a relay instead of an
+  address of your own: both sides dial out, so no port forward, no UPnP and no
+  public address are needed. The relay only joins the two sockets — the session
+  handshake runs end to end over it, so it cannot read or alter the stream.
 
 The code carries the public address, the host's LAN address (when it has one),
 the port, the purpose and a 128-bit secret; the far side needs nothing else.

@@ -6,6 +6,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 pub const KIND_SSH: u8 = b's';
 pub const KIND_UPLOAD: u8 = b'u';
+/// Set when the address in the code is a pairing relay rather than the host
+/// itself. Both sides dial out, so neither needs an inbound port.
+pub const RELAY_BIT: u8 = 0x80;
 pub const SECRET_LEN: usize = 16;
 
 const VER4: u8 = 4;
@@ -185,7 +188,7 @@ impl Code {
         }
 
         let kind = raw[1];
-        if kind != want {
+        if kind & !RELAY_BIT != want {
             return Err(format!(
                 "that is a {} code, this command wants a {} code",
                 kind_name(kind),
@@ -211,8 +214,13 @@ impl Code {
     }
 }
 
+/// True when the code's address is a relay that both sides dial into.
+pub fn is_relay(kind: u8) -> bool {
+    kind & RELAY_BIT != 0
+}
+
 pub fn kind_name(kind: u8) -> &'static str {
-    match kind {
+    match kind & !RELAY_BIT {
         KIND_SSH => "ssh",
         KIND_UPLOAD => "upload",
         _ => "unknown",

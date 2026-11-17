@@ -6,10 +6,11 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::cli::Args;
-use crate::code::{Code, KIND_SSH, SECRET_LEN};
+use crate::code::{is_relay, Code, KIND_SSH, RELAY_BIT, SECRET_LEN};
 use crate::expose;
 use crate::netinfo;
 use crate::rand;
+use crate::relay;
 use crate::splice::splice;
 use crate::tunnel;
 
@@ -37,6 +38,23 @@ pub fn start(raw: &[String]) -> Result<(), String> {
         return Err(format!("-ssh-port {ssh_port} is out of range"));
     }
 
+    let upstream = format!("{target}:{ssh_port}");
+
+    // A listener with nothing behind it accepts the tunnel and then closes it,
+    // which looks like a broken relay on the far side rather than a missing
+    // sshd here. Check once, at startup, and say it plainly.
+    if !upstream_answers(&upstream) {
+        eprintln!(
+            "ax: warning: nothing is listening on {upstream} — ssh will connect to the \
+             tunnel and be closed immediately. start sshd there, or pass -ssh-port <n> \
+             (Termux listens on 8022, not 22)"
+        );
+    }
+
+    if let Some(text) = args.get("relay") {
+        return start_relayed(&relay::resolve(text)?, &upstream);
+    }
+
     let listener = TcpListener::bind((bind.as_str(), port as u16))
         .map_err(|e| format!("listen on {bind}:{port}: {e}"))?;
     let internal = listener
@@ -51,19 +69,6 @@ pub fn start(raw: &[String]) -> Result<(), String> {
         Some(lan) => Code::with_alt(KIND_SSH, endpoint.ip, lan, endpoint.port, secret)?,
         None => Code::new(KIND_SSH, endpoint.ip, endpoint.port, secret)?,
     };
-
-    let upstream = format!("{target}:{ssh_port}");
-
-    // A listener with nothing behind it accepts the tunnel and then closes it,
-    // which looks like a broken relay on the far side rather than a missing
-    // sshd here. Check once, at startup, and say it plainly.
-    if !upstream_answers(&upstream) {
-        eprintln!(
-            "ax: warning: nothing is listening on {upstream} — ssh will connect to the \
-             tunnel and be closed immediately. start sshd there, or pass -ssh-port <n> \
-             (Termux listens on 8022, not 22)"
-        );
-    }
 
     eprintln!(
         "ax: forwarding {} -> {upstream}",
@@ -88,10 +93,36 @@ pub fn start(raw: &[String]) -> Result<(), String> {
         };
 
         let upstream = upstream.clone();
-        std::thread::spawn(move || handle_client(sock, secret, &upstream));
+        std::thread::spawn(move || handle_client(sock, secret, &upstream, false));
     }
 
     Ok(())
+}
+
+/// No inbound port: both sides dial the relay and get joined there, then the
+/// ordinary handshake runs over the joined stream.
+fn start_relayed(relay_addr: &SocketAddr, upstream: &str) -> Result<(), String> {
+    let secret: [u8; SECRET_LEN] = rand::bytes()?;
+    let kind = KIND_SSH | RELAY_BIT;
+    let code = Code::new(kind, relay_addr.ip(), relay_addr.port(), secret)?;
+
+    eprintln!("ax: relaying through {relay_addr} -> {upstream}");
+    println!("{}", code.encode());
+    eprintln!(
+        "\non the other machine:\n  ax connectssh {}\n",
+        code.encode()
+    );
+
+    loop {
+        match relay::client(*relay_addr, &secret, relay::Role::Host) {
+            Ok(sock) => {
+                eprintln!("ax: joined the relay room, waiting for the other side");
+                handle_client(sock, secret, upstream, true);
+            }
+            Err(e) => eprintln!("ax: relay {relay_addr}: {e}; retrying in 2s"),
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 fn upstream_answers(upstream: &str) -> bool {
@@ -108,11 +139,19 @@ fn upstream_answers(upstream: &str) -> bool {
     })
 }
 
-fn handle_client(sock: TcpStream, secret: [u8; SECRET_LEN], upstream: &str) {
-    let peer = sock
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| "unknown".into());
+fn handle_client(
+    sock: TcpStream,
+    secret: [u8; SECRET_LEN],
+    upstream: &str,
+    via_relay: bool,
+) {
+    let peer = if via_relay {
+        "relay side".to_string()
+    } else {
+        sock.peer_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "unknown".into())
+    };
 
     let tunnel = match tunnel::server(sock, &secret) {
         Ok(t) => t,
@@ -153,7 +192,13 @@ pub fn connect(raw: &[String]) -> Result<(), String> {
         .unwrap_or_default();
 
     let verbose = args.flag("v") || args.flag("verbose");
-    let sock = netinfo::dial_any(&code.addrs(), Duration::from_secs(timeout as u64), verbose)?;
+    let sock = if is_relay(code.kind) {
+        let addr = code.addrs()[0];
+        eprintln!("ax: joining the relay room at {addr}");
+        relay::client(addr, &code.secret, relay::Role::Client)?
+    } else {
+        netinfo::dial_any(&code.addrs(), Duration::from_secs(timeout as u64), verbose)?
+    };
     let tunnel = tunnel::client(sock, &code.secret)?;
 
     let local = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("local bind: {e}"))?;

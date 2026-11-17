@@ -32,6 +32,9 @@ pub fn local_ip() -> Result<IpAddr, String> {
 /// judged on the first two octets. Conservative on purpose: a false positive
 /// only costs a timeout, a false negative would skip an address that works.
 pub fn same_private_scope(a: IpAddr, b: IpAddr) -> bool {
+    if a.is_loopback() || b.is_loopback() {
+        return true;
+    }
     match (a, b) {
         (IpAddr::V4(a), IpAddr::V4(b)) => {
             let (a, b) = (a.octets(), b.octets());

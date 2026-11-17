@@ -9,11 +9,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::cli::Args;
-use crate::code::{Code, KIND_UPLOAD, SECRET_LEN};
+use crate::code::{is_relay, Code, KIND_UPLOAD, RELAY_BIT, SECRET_LEN};
 use crate::crypto::Sha256;
 use crate::expose;
 use crate::netinfo;
 use crate::rand;
+use crate::relay;
 use crate::tunnel::{self, Tunnel};
 
 const MAX_NAME_LEN: usize = 1024;
@@ -56,6 +57,43 @@ pub fn upload(raw: &[String]) -> Result<(), String> {
     let path = args.positional[0].clone();
 
     let (sum, size) = hash_file(&path)?;
+    let secret: [u8; SECRET_LEN] = rand::bytes()?;
+
+    if let Some(text) = args.get("relay") {
+        let relay_addr = relay::resolve(text)?;
+        let code = Code::new(
+            KIND_UPLOAD | RELAY_BIT,
+            relay_addr.ip(),
+            relay_addr.port(),
+            secret,
+        )?;
+
+        eprintln!(
+            "ax: sharing {} ({}) through the relay at {relay_addr}",
+            base_name(&path),
+            human(size)
+        );
+        println!("{}", code.encode());
+        eprintln!(
+            "\nthe other machine runs:\n  ax download {}\n\nwaiting for the receiver",
+            code.encode()
+        );
+
+        loop {
+            match relay::client(relay_addr, &secret, relay::Role::Host) {
+                Ok(sock) => match tunnel::server(sock, &secret) {
+                    Ok(t) => {
+                        if send_file(t, &path, sum, size).is_ok() {
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => eprintln!("ax: rejected a caller: {e}"),
+                },
+                Err(e) => eprintln!("ax: relay {relay_addr}: {e}; retrying in 2s"),
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
 
     let listener = TcpListener::bind((bind.as_str(), port as u16))
         .map_err(|e| format!("listen on {bind}:{port}: {e}"))?;
@@ -66,7 +104,6 @@ pub fn upload(raw: &[String]) -> Result<(), String> {
 
     let endpoint = expose::expose_tcp(internal, pinned_host, pinned_port, no_map, "ax transfer")?;
 
-    let secret: [u8; SECRET_LEN] = rand::bytes()?;
     let code = match endpoint.alt {
         Some(lan) => Code::with_alt(KIND_UPLOAD, endpoint.ip, lan, endpoint.port, secret)?,
         None => Code::new(KIND_UPLOAD, endpoint.ip, endpoint.port, secret)?,
@@ -132,7 +169,13 @@ pub fn download(raw: &[String]) -> Result<(), String> {
     let code = Code::parse(KIND_UPLOAD, &args.positional[0])?;
 
     let verbose = args.flag("v") || args.flag("verbose");
-    let sock = netinfo::dial_any(&code.addrs(), Duration::from_secs(timeout as u64), verbose)?;
+    let sock = if is_relay(code.kind) {
+        let addr = code.addrs()[0];
+        eprintln!("ax: joining the relay room at {addr}");
+        relay::client(addr, &code.secret, relay::Role::Client)?
+    } else {
+        netinfo::dial_any(&code.addrs(), Duration::from_secs(timeout as u64), verbose)?
+    };
     let tunnel = tunnel::client(sock, &code.secret)?;
 
     receive_file(tunnel, &out_dir)

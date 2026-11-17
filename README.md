@@ -108,6 +108,29 @@ On Android/Termux, `sshd` listens on **8022**, not 22 — start the host side wi
 
 The side that prints the code must be reachable from the side that dials it. A container, an emulator, a VM behind NAT, or a phone on mobile data has no inbound path, so no code it prints can ever be dialled from outside. Run `startssh`/`upload` on the machine that owns the connection — a laptop or desktop on a normal network with UPnP, or a host with a port you forwarded yourself. `startssh` warns you when it could not arrange a mapping, which is exactly the case where the far side will time out.
 
+If no inbound path exists and you cannot create one, use a relay instead.
+
+### Relay mode
+
+A relay is any machine with a reachable port. Both ends dial *out* to it, so neither one needs a forward, UPnP, or a public address.
+
+```sh
+# on the reachable box (a VPS, or any host with a port open)
+ax relay -port 7000
+
+# on the machine that has the sshd
+ax startssh -relay vps.example.com:7000 -ssh-port 22
+
+# anywhere, including a phone on mobile data
+ax connectssh <code> <user>
+```
+
+`upload` works the same way: `ax upload file.bin -relay vps.example.com:7000`, then `ax download <code>` from anywhere.
+
+The relay never sees the session. Each side joins the room named by an HMAC of the code secret, the relay splices the two sockets together, and the normal X25519 handshake runs end to end over the joined stream — no key material and no plaintext ever reach the relay. A code carries the relay's address instead of a host address, so there is nothing else to configure on the client. When the host has no relay to point at and no inbound port either, that is the only mode that works.
+
+Free, already-running hosts for `ax relay`: any small VPS, a spare Raspberry Pi behind a forwarded port, or the free tier of a cloud provider. Third-party TCP tunnels (Cloudflare Tunnel with `tcp`, `bore.pub`, Pinggy, `localhost.run`) also work as plain forwards, but a relay you control is one command and no account.
+
 ## File transfer
 
 ```
