@@ -200,15 +200,26 @@ pub fn dial_any(addrs: &[SocketAddr], timeout: Duration, verbose: bool) -> Resul
 
     let tried = seen
         .iter()
-        .map(|a| a.to_string())
+        .map(|a| {
+            if is_private(a.ip()) {
+                format!("{a} (private)")
+            } else {
+                a.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
+
+    // A private candidate can only answer from the host's own network, and a
+    // public one needs a forward that may not exist. Say which is which so the
+    // failure points at the missing piece instead of at ax.
     Err(format!(
         "could not reach the host at {tried} within {}s — \n\
-         \x20 check that startssh is still running and the port is reachable\n\
-         \x20 if both machines share a network, the LAN address is tried first\n\
-         \x20 behind CGNAT no forward exists: rerun there with -host <public ip>\n\
-         \x20 after forwarding the port yourself",
+         \x20 check that startssh is still running on the host and the port is open\n\
+         \x20 a private address only answers from inside the host's own network\n\
+         \x20 a public address needs tcp/<port> forwarded to the host (UPnP, or\n\
+         \x20   -no-map -host <public-ip> -pub-port <forwarded-port> on the host)\n\
+         \x20 a host inside a container, VM or CGNAT has no inbound path at all",
         timeout.as_secs()
     ))
 }

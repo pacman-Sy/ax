@@ -93,8 +93,15 @@ pub fn expose_tcp(
              for internet use"
         );
     } else if !mapped && pinned_host.is_none() {
+        // A public address was discovered, but nothing opened the port. That
+        // address is a guess about the router, not a promise, and the far side
+        // pays for the guess with a full timeout.
         eprintln!(
-            "ax: note: no automatic port forward — the router must already forward tcp/{port}"
+            "ax: warning: no port mapping — tcp/{port} is not open from outside.\n\
+             \x20 this code only works if you already forward tcp/{port} to this machine.\n\
+             \x20 enable UPnP/IGD on the router and rerun, or forward the port yourself and\n\
+             \x20 rerun with -no-map -host <public-ip> -pub-port <forwarded-port>.\n\
+             \x20 a container, VM or CGNAT host cannot accept inbound at all."
         );
     }
 

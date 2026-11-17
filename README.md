@@ -104,6 +104,10 @@ Both sides diagnose the common failure instead of leaving you with a bare `ssh: 
 
 On Android/Termux, `sshd` listens on **8022**, not 22 — start the host side with `ax startssh -ssh-port 8022`.
 
+### Where the host has to run
+
+The side that prints the code must be reachable from the side that dials it. A container, an emulator, a VM behind NAT, or a phone on mobile data has no inbound path, so no code it prints can ever be dialled from outside. Run `startssh`/`upload` on the machine that owns the connection — a laptop or desktop on a normal network with UPnP, or a host with a port you forwarded yourself. `startssh` warns you when it could not arrange a mapping, which is exactly the case where the far side will time out.
+
 ## File transfer
 
 ```
