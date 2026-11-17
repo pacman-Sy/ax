@@ -12,19 +12,26 @@ ax download <code>              # fetches it, verifies the checksum
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pacman-Sy/ax/main/install.sh | bash
+curl -fsSL https://github.com/pacman-Sy/ax/releases/latest/download/install.sh | bash
 ```
 
-Builds from source with cargo and drops the binary in `~/.local/bin` (`AX_PREFIX` to change it).
+No toolchain needed: the script downloads the prebuilt release binary for your platform, checks its SHA-256, and installs it to `~/.local/bin` (`AX_PREFIX` to change it). Where there is no build for the platform it falls back to compiling from source, installing a minimal Rust toolchain first if there is none.
 
-Or build it yourself:
+Current releases ship `ax-linux-x86_64`, statically linked against musl, so it runs on any x86_64 Linux regardless of glibc. Grab it directly if you prefer:
+
+```sh
+curl -fLO https://github.com/pacman-Sy/ax/releases/latest/download/ax-linux-x86_64
+chmod +x ax-linux-x86_64 && ./ax-linux-x86_64 version
+```
+
+Building from source, zero crates:
 
 ```sh
 git clone https://github.com/pacman-Sy/ax && cd ax
-cargo build --release      # target/release/ax, no dependencies to download
+cargo build --release      # target/release/ax
 ```
 
-Rust 1.70+, Linux / macOS / Windows, zero crates.
+Rust 1.70+. Linux, macOS, Windows.
 
 ## Why there is no middle server
 
