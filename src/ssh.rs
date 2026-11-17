@@ -54,6 +54,17 @@ pub fn start(raw: &[String]) -> Result<(), String> {
 
     let upstream = format!("{target}:{ssh_port}");
 
+    // A listener with nothing behind it accepts the tunnel and then closes it,
+    // which looks like a broken relay on the far side rather than a missing
+    // sshd here. Check once, at startup, and say it plainly.
+    if !upstream_answers(&upstream) {
+        eprintln!(
+            "ax: warning: nothing is listening on {upstream} — ssh will connect to the \
+             tunnel and be closed immediately. start sshd there, or pass -ssh-port <n> \
+             (Termux listens on 8022, not 22)"
+        );
+    }
+
     eprintln!(
         "ax: forwarding {} -> {upstream}",
         SocketAddr::new(endpoint.ip, endpoint.port)
@@ -81,6 +92,20 @@ pub fn start(raw: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn upstream_answers(upstream: &str) -> bool {
+    if let Ok(addr) = upstream.parse::<SocketAddr>() {
+        return TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).is_ok();
+    }
+
+    let want = upstream.to_string();
+    let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&want) else {
+        return false;
+    };
+    addrs.into_iter().any(|addr| {
+        TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).is_ok()
+    })
 }
 
 fn handle_client(sock: TcpStream, secret: [u8; SECRET_LEN], upstream: &str) {
@@ -150,6 +175,10 @@ pub fn connect(raw: &[String]) -> Result<(), String> {
     };
 
     eprintln!("ax: tunnel on 127.0.0.1:{local_port}, launching {ssh_bin}");
+    eprintln!(
+        "ax: if ssh reports \"Connection closed\", the host side has no sshd on the \
+         forwarded port — check sshd is running and try -ssh-port (Termux defaults to 8022)"
+    );
 
     let status = Command::new(&ssh_bin)
         .arg("-o")
@@ -161,6 +190,14 @@ pub fn connect(raw: &[String]) -> Result<(), String> {
         .map_err(|e| format!("run {ssh_bin}: {e}"))?;
 
     if !status.success() {
+        eprintln!(
+            "ax: the tunnel opened, so the code was correct — ssh failed past it.\n\
+             \x20 \"Connection closed\" means the host has no sshd on the port startssh forwards:\n\
+             \x20   restart it there with the right -ssh-port (Termux sshd listens on 8022,\n\
+             \x20   not 22) and check sshd is actually running\n\
+             \x20 a password or key prompt that never appears means the host user is wrong:\n\
+             \x20   ax connectssh <code> <user>"
+        );
         return Err(format!("{ssh_bin} exited with {status}"));
     }
     Ok(())

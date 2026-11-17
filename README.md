@@ -97,6 +97,13 @@ ax: tunnel on 127.0.0.1:45487, launching ssh
 
 `connectssh` opens an encrypted tunnel, then runs your system `ssh` against `127.0.0.1:<local port>` with `StrictHostKeyChecking=accept-new`. sshd does its own multiplexing inside that single stream, so a tunnel is all that is needed. `-ssh <path>` picks a different ssh binary, `-ssh-port` points the relay at a non-standard sshd, `-target` relays to another host on the listener's network.
 
+Both sides diagnose the common failure instead of leaving you with a bare `ssh: exit status 255`:
+
+- `startssh` probes the upstream once at startup. If nothing answers on `-target`:`-ssh-port`, it warns that ssh will be closed immediately.
+- `connectssh` prints the local tunnel port, and when ssh exits non-zero explains that `Connection closed by 127.0.0.1` means the host has no sshd on the forwarded port.
+
+On Android/Termux, `sshd` listens on **8022**, not 22 — start the host side with `ax startssh -ssh-port 8022`.
+
 ## File transfer
 
 ```
